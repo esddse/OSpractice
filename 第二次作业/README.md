@@ -23,6 +23,7 @@ master通过*resource offer*在框架间进行资源分配，这种机制使得�
 ![resource offer](./pics/resource_offer.PNG)
 
 主要经过下面4个步骤:
+
 1. Agent 1 向master报告它有4个CPU和4GB内存可用。于是master启用分配模块，得知framework 1 应该分配所有当前可用的资源。
 2. master发送向framework 1 发送resource offer，告诉framework 1 在agent 1 上有哪些可用的资源。
 3. framework 1 的scheduler发送信息回应master，描述了将要在agent上运行的两个任务，第一个任务需要2个CPU、1GB内存，第二个任务需要1个CPU、2GB内存。
