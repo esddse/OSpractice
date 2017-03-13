@@ -7,12 +7,14 @@
 ![mesos架构](./pics/mesos_arch.PNG)
 
 上图比较简明扼要地展示了Mesos的主要组成部分。Mesos包括一个*master*守护进程，用来管理运行在各个集群结点上的*agent*守护进程，*Mesos frameworks*在这些agent之上运行各种任务。
+
 master通过*resource offer*在框架间进行资源分配，这种机制使得细粒度的资源共享称为了可能。master会根据现有的分配组织策略（比如均等的分配策略或者有严格优先级的分配策略）来决定对各个框架分别offer多少资源。为了支持多种分配策略，master通过模块化架构和模块插入机制使其较为简单地实现。
+
 在Mesos之上运行地framework包括两个组成部分：一个scheduler负责向master注册，以及接受或者拒绝master的资源offer；另一个executor运行在agent结点上，执行framework的任务。master决定配给一个framework多少资源，而该framework的scheduler选择到底用哪一个被分配的资源。当一个framework接受资源offer，它会将任务描述发送给Mesos，然后Mesos将这些任务在agent上启动。
 
 在源代码中的位置如下
 * master: [mesos-1.1.0/src/master](../mesos-1.1.0/mesos-1.1.0/src/master)
-* agent(slave): [mesos-1.1.0/src/slave](../mesos-1.1.0/mesos-1.1.0/src/slave)
+* agent(slave): [mesos-1.1.0/src/slave](../mesos-1.1.0/mesos-1.1.0/src/slave)以及[mesos-1.1.0/src/master](../mesos-1.1.0/mesos-1.1.0/src/master)中的一部分
 * framework-scheduler: [mesos-1.1.0/src/scheduler](../mesos-1.1.0/mesos-1.1.0/src/scheduler)
 * framework-executer: [mesos-1.1.0/src/executer](../mesos-1.1.0/mesos-1.1.0/src/executer)
 
@@ -35,7 +37,30 @@ master通过*resource offer*在框架间进行资源分配，这种机制使得�
 
 ##### Master
 
-master目录中和运行流程有关的文件是[main.cpp](../mesos-1.1.0/mesos-1.1.0/src/master/main.cpp)和[master.cpp](../mesos-1.1.0/mesos-1.1.0/src/master/master.cpp)。
+master目录中和运行流程有关的文件是[main.cpp](../mesos-1.1.0/mesos-1.1.0/src/master/main.cpp)[master.hpp](../mesos-1.1.0/mesos-1.1.0/src/master.master.hpp)和[master.cpp](../mesos-1.1.0/mesos-1.1.0/src/master/master.cpp)。
+
+在main.cpp中，先是进行了一些配置工作，比如设定ip、端口、防火墙等，在一系列配置之后，在最后终于创建了一个master实例:
+
+```
+Master* master =
+	  new Master(
+      	allocator.get(),
+      	registrar,
+      	&files,
+      	contender,
+      	detector,
+      	authorizer_,
+      	slaveRemovalLimiter,
+      	flags);
+```
+创建完后为了真正让其运行起来，还需要产生一个独立的master进程。并且创建完毕后等待master进程结束。
+```
+process::spawn(master);
+process::wait(master->self());
+```
+
+而在master.cpp中
+
 
 ##### Agent
 
