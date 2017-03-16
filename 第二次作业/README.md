@@ -8,7 +8,9 @@
 
 上图比较简明扼要地展示了Mesos的主要组成部分。Mesos包括一个*master*守护进程，用来管理运行在各个集群结点上的*agent*守护进程，*Mesos frameworks*在这些agent之上运行各种任务。
 
-master通过*resource offer*在框架间进行资源分配，这种机制使得细粒度的资源共享称为了可能。master会根据现有的分配组织策略（比如均等的分配策略或者有严格优先级的分配策略）来决定对各个框架分别offer多少资源。为了支持多种分配策略，master通过模块化架构和模块插入机制使其较为简单地实现。显然master可能会遇到单点故障的问题，Mesos通过Zookeeper解决该问题。它会维持一些预备的master结点，在当前master出现故障时由预备master通过“选举机制”选出新的master。
+master通过*resource offer*在框架间进行资源分配，这种机制使得细粒度的资源共享称为了可能。master会根据现有的分配组织策略（比如均等的分配策略或者有严格优先级的分配策略）来决定对各个框架分别offer多少资源。为了支持多种分配策略，master通过模块化架构和模块插入机制使其较为简单地实现。显然master可能会遇到单点故障的问题，Mesos通过Zookeeper解决该问题。它会维持一些预备的master结点，在当前master出现故障时由预备master通过“选举机制”选出新的master。Zookeeper选举和两个模块有关:contender和detecter,contenter是用来进行master竞选的，而detecter用来发现当前使用的master,其机制图如下:
+
+![mesos竞选](./pics/contender-detecter.PNG)
 
 agent负责接受并执行来自master的命令，管理节点上的task。当agent上存在空闲的资源时，agent将自己的空闲资源量发送给master，再由master的分配。当task运行时，agent会将任务放到包含固定资源的container中运行，以达到资源隔离的效果。
 
@@ -74,11 +76,13 @@ Mesos里面的消息传递是通过libprocess + protocol buffer来实现的。�
 
 ![消息传递接收](./pics/libprocess.jpg)
 
+在后台会运行一个且不断监听protocal buffer消息的socket server，获取消息并放入队列中，然后分别分派给不同的功能模块执行。
+
 #### Master
 
 master目录中和初始化流程有关的文件是[main.cpp](../mesos-1.1.0/mesos-1.1.0/src/master/main.cpp)[master.hpp](../mesos-1.1.0/mesos-1.1.0/src/master.master.hpp)和[master.cpp](../mesos-1.1.0/mesos-1.1.0/src/master/master.cpp)。
 
-在main.cpp中，先是进行了一些配置工作，比如设定ip、端口、防火墙等，在一系列配置之后，在最后终于创建了一个master实例:
+在main.cpp中，先记录了一些命令行参数到参数flags中，然后检查参数，并进行了一些配置工作，比如启动日志记录、初始化防火墙等，在一系列配置之后，在最后终于创建了一个master实例:
 
 ```
 Master* master =
@@ -92,13 +96,100 @@ Master* master =
       	slaveRemovalLimiter,
       	flags);
 ```
-创建完后为了真正让其运行起来，还需要产生一个独立的process。并且创建完毕后等待master进程结束。这里的process就是在上文中说到的libprocess中定义的process，而不是简单的进程。
+创建完后为了还需要将其启动(spawn函数)，并且等待master进程结束(wait函数)。这里的process就是在上文中说到的libprocess中定义的process，而不是简单的进程。
 ```
 process::spawn(master);
 process::wait(master->self());
 ```
 
-在master.hpp中定义了master的基本功能和数据结构
+
+在master.hpp中定义了master的基本功能和数据结构，定义在类``class Master : public ProtobufProcess<Master>``中。可见Master继承了类模板ProtobufProcess，后者定义在libprocess中，正如在前面一节所说到的，ProtobufProcess是一个可以不断接受信息的任务单元。
+
+在``private``中我们可以找到master定义的内部属性(很多目前还看不懂....):
+
+* flags:记录了一些命令行参数
+* http:一个http路由处理类的实例
+* leader:当前的master
+* allocator:分配模块
+* whitelistWatcher:白名单监视器
+* registrar:注册器
+* files:文件类的实例，实际上是一个从HTTP终端的浏览和读文件的抽象，定义在file/file.hpp中
+* contender:竞选模块，用于新master竞选，保证高可用
+* detecter:探测模块，用于探测当前master，也是用于保证master的高可用性，可contender一起组成zookeeper竞争机制
+* authorizer:
+* info_:
+* machines:一个哈希表，记录了机器的id和机器信息
+* slaves:一个结构体，定义了当前master所管理的slave的一些信息
+* frameworks:一个结构体，定义了当前master所管理的framework的一些信息
+* subscribers:一个结构体，定义了一些终端客户的信息
+* recovered:表示完成了恢复。当一个master被选上来就会开始恢复机制
+* registryGcTimer:垃圾回收计时器记录，master会周期性地检查这个记录，看何时做垃圾回收
+* offers:一个哈希表，记录了offer的id和offer的对应
+* offerTimers:一个哈希表，记录了offer的id和计时器的对应
+* inverseOffers:一个哈希表，记录offer的id和inverseOffer的对应
+* inversOfferTimers:一个哈希表，记录了offerid和计时器的对应
+* activeRoles:一个哈希表
+* roleWhitelist:
+* weight:一个哈希表，记录每个role的权值
+* quotas:一个哈希表，记录每个role的配额
+* authenticatorNames:
+* authenticator:
+* authenticating:
+* anthenticated:
+* nextFrameworkId:
+* nextOfferId:
+* nextSlaveId:
+* metrics:
+* startTime:
+* electedTime:master被选举上的时间
+
+在master.cpp中和master初始化有关的函数有master的构造函数``Master::Master()``以及一个特殊的初始化函数``Master::initialize()``
+
+先看构造函数：
+```
+Master::Master(
+    Allocator* _allocator,
+    Registrar* _registrar,
+    Files* _files,
+    MasterContender* _contender,
+    MasterDetector* _detector,
+    const Option<Authorizer*>& _authorizer,
+    const Option<shared_ptr<RateLimiter>>& _slaveRemovalLimiter,
+    const Flags& _flags)
+  : ProcessBase("master"),
+    flags(_flags),
+    http(this),
+    allocator(_allocator),
+    registrar(_registrar),
+    files(_files),
+    contender(_contender),
+    detector(_detector),
+    authorizer(_authorizer),
+    frameworks(flags),
+    authenticator(None()),
+    metrics(new Metrics(*this)),
+    electedTime(None())
+```
+
+构造函数直接使用参数初始化列表初始化分配模块、注册器、文件等。
+
+然后是设置slave的速率限制器，限制的速率是"the removal of slaves failing health checks"???:
+
+```
+slaves.limiter = _slaveRemovalLimiter;
+```
+
+接下来是设置master的id（随机数），设置ip、端口等，以及设置主机名。
+
+最后又是设置ip、端口? mutable_address什么作用????
+```
+  // This uses the new `Address` message in `MasterInfo`.
+  info_.mutable_address()->set_ip(stringify(self().address.ip));
+  info_.mutable_address()->set_port(self().address.port);
+  info_.mutable_address()->set_hostname(hostname);
+```
+接着看函数``Master::initialize()``，其中进行了更多的初始化设置。暂时没发现是在哪调用的这个函数。
+
 
 
 #### Slave (Agent)
