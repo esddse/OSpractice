@@ -236,40 +236,112 @@ slaves.limiter = _slaveRemovalLimiter;
 
 在slave.hpp中，slave被定义在``class Slave : public ProtobufProcess<Slave>``中。和master一样，它也是继承了libprocess的ProtobufProcess。其在private中定义的属性如下:
 
-* flags
-* http
-* info
-* checkpointedResources
-* totalResources
-* master
-* frameworks
-* completedFrameworks
-* detecter
-* conteainerizer
-* files
-* metrics
-* startTime
-* gc
-* statusUpdateManager
-* detection
-* masterPingTimeout
-* pingTimer
-* metaDir
-* recoveryErrors
-* credential
-* authenticateeName
-* authenticatee
-* anthenticating
-* authenticated
-* reauthenticate
-* failedAuthentications
-* executorDirectoryMaxAllowedAge
-* resourceEstimator
+* flags：记录了一些命令行参数
+* http：http路由处理程序
+* info：记录了一些基本信息
+* checkpointedResources：被slave checkpoint过的资源?????
+* totalResources：agent当前的所有资源
+* master：对应的master
+* frameworks：一个哈希表，记录了framework的id和对应的framework
+* completedFrameworks：已完成的任务
+* detecter：检测器，用于检测当前master
+* conteainerizer：竞争器，用于在master候选中选出leader master
+* files：文件
+* metrics：
+* startTime：运行起始时间
+* gc：垃圾收集器
+* statusUpdateManager：状态更新管理器
+* detection：也是用于master detection，和detector有什么区别？？？
+* masterPingTimeout：master ping超时的值，在重新注册时更新
+* pingTimer：计时器，当没有受到来自master的ping的时候触发
+* metaDir：装有checkpoint数据的目录的根目录
+* recoveryErrors：表示在"--no-strict"recovery模式中忽略的错误号
+* credential：
+* authenticateeName：通过命令行参数传进来的被认证者的名字
+* authenticatee：被认证者
+* anthenticating：表示是否有一个认证过程正在进行
+* authenticated：表示认证是否成功
+* reauthenticate：表示一个新的认证过程是否需要执行
+* failedAuthentications：表示认证失败的次数
+* executorDirectoryMaxAllowedAge：executor目录的最大存在时间
+* resourceEstimator：资源估计器
 * qosController
-* authorizer
-* oversubscribedResources
+* authorizer：授权者
+* oversubscribedResources：对于多分配的资源的最新的估计
 
 在slave.cpp中也是有两处和初始化有关，一是构造函数``Slave::Slave()``,另一个是初始化函数``Slave::initialize()``
+
+在构造函数中，Slave直接用初始化列表初始化了id、认证、授权等一系列属性：
+```
+Slave::Slave(const string& id,
+             const slave::Flags& _flags,
+             MasterDetector* _detector,
+             Containerizer* _containerizer,
+             Files* _files,
+             GarbageCollector* _gc,
+             StatusUpdateManager* _statusUpdateManager,
+             ResourceEstimator* _resourceEstimator,
+             QoSController* _qosController,
+             const Option<Authorizer*>& _authorizer)
+  : ProcessBase(id),
+    state(RECOVERING),
+    flags(_flags),
+    http(this),
+    completedFrameworks(MAX_COMPLETED_FRAMEWORKS),
+    detector(_detector),
+    containerizer(_containerizer),
+    files(_files),
+    metrics(*this),
+    gc(_gc),
+    statusUpdateManager(_statusUpdateManager),
+    masterPingTimeout(DEFAULT_MASTER_PING_TIMEOUT()),
+    metaDir(paths::getMetaRootDir(flags.work_dir)),
+    recoveryErrors(0),
+    credential(None()),
+    authenticatee(nullptr),
+    authenticating(None()),
+    authenticated(false),
+    reauthenticate(false),
+    failedAuthentications(0),
+    executorDirectoryMaxAllowedAge(age(0)),
+    resourceEstimator(_resourceEstimator),
+    qosController(_qosController),
+    authorizer(_authorizer) {}
+```
+
+函数``Slave::initialize()``初始化的情况如下:
+
+* 208-209：输出日志
+* 211-218：检查slave是否绑定在loopback界面上
+* 220-323：对每一个子系统，将slave移动到它的cgroup之下  cgroup是什么???
+* 325-330：检查registration_backoff_factor 什么用？？？
+* 334-386：处理认证相关信息
+* 388-382：检查gc_disk_headroom
+* 394-400：初始化resourceEstimater
+* 402-407：初始化qosController
+* 409-411：检查slave工作目录是否存在
+* 413-417：初始化resources
+* 419-491：确认所有磁盘上的源？？（source）可用
+* 493-496：初始化属性（attributes）
+* 498-517：初始化hostname
+* 519-527：初始化slave的信息（info）
+* 529-539：通过info.resources初始化totalResources
+* 543-544：enable checkpointing of slaves
+* 546：输出日志：agent hostname
+* 548-549：初始化状态更新管理器(statusUpdateMananger)
+* 551-555：启动磁盘监视
+* 557：记录启动时间
+* 559-649：安装protobuf处理函数
+* 652-724：设置HTTP路由
+* 726：设置pid
+* 728-733：设置认证
+* 735-753：将日志文件提供给webUI
+* 755-760：检查recover标志是否有效
+* 762-775：安装信号处理函数
+* 777-781：做recovery
+
+
+
 
 
 
