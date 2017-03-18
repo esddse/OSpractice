@@ -347,6 +347,8 @@ Slave::Slave(const string& id,
 
 ## 4. 查找资料，简述Mesos的资源调度算法，指出在源代码中的具体位置并阅读，说说你对它的看法
 
+#### DRF算法概述
+
 Mesos使用的资源调度算法是Dominant Resource Fairness（DRF），相关论文戳[这里](./参考资料/dominant_resourse_fairness_fair_allocation_of_multiple_resource_types.pdf)
 
 Mesos面临的资源调度问题主要是资源的异质性带来的，当你对资源分配的时候，考虑的不是单一的资源，而是需要多种资源（CPU、内存、I/O等）综合考虑。而像Hadoop、Dryad这种框架进行资源分配时就完全忽视了对不同资源需求不同的问题。
@@ -366,5 +368,258 @@ DRF算法的关键就是dominant resource和dominant share，dominant resource�
 假设这里有一个有9个CPU和18GB RAM 的系统，有两个用户A和B，A的每一个task需要\<1 CPU, 4GB RAM>，B的每一个task需要\<3CPUs, 1GB RAM>。表中的每一行代表DRF算法进行一次资源分配。首先由于二者的资源都是0，随机选择B，并分配一个task的资源，此时B有3个CPU，占总数的1/3，1GB的RAM，占总数的1/18，因此B的dominant resource时CPU，dominant share是1/3，而此时A的dominant share还是0。由于A 的dominant share小，故这一次分配给A，于是A得到1CPU，4GB RAM，A的dominant resource是RAM，dominant share是2/9。而A的dominant share还是小于B，故下一次分配还是分配给A。如此循环往复，直到CPU资源被分完，不能再分为止。此时A分得\<3CPUs, 12GB RAM>,B分得\<6CPUs, 2GB RAM>，双方得dominant share都是2/3。
 
 Weignted DRF(wDRF)是DRF得一个小变种，它为每个用户得每个使用得资源都分配了一个权重系数，则dominant share需要变为得到资源得比例除以这个系数。如果所有的系数都设为1，那就变为普通的DRF。
+
+#### 源码
+
+mesos分配的源码在目录[src/master/allocator](../mesos-1.1.0/mesos-1.1.0/src/master/allocator)中，默认的分配器是HierarchicalAllocator,其定义在[src/master/allocator/mesos/hierarchical.hpp](../mesos-1.1.0/mesos-1.1.0/src/master/allocator/mesos/hierarchical.hpp)和[src/master/allocator/mesos/hierarchical.cpp](../mesos-1.1.0/mesos-1.1.0/src/master/allocator/mesos/hierarchical.cpp)中。
+
+DRF算法的源码在目录[src/master/allocator/sorter/drf](../mesos-1.1.0/mesos-1.1.0/src/master/allocator/sorter/drf)中，主要在[sorter.hpp](../mesos-1.1.0/mesos-1.1.0/src/master/allocator/sorter/drf/sorter.hpp)和[sorter.cpp](../mesos-1.1.0/mesos-1.1.0/src/master/allocator/sorter/drf/sorter.cpp)两个源文件中。我先从底层DRF算法介绍
+
+###### sorter.hpp、sorter.cpp
+
+sorter.hpp中定义了两个结构体，一个类。
+
+Client结构封装了Client类，一个Client可能是一个user或者framework，加上了一个share变量表示该用户分配的份额，变量allocations记录了该用户被算法选中分配的次数:
+```
+struct Client
+{
+  Client(const std::string& _name, double _share, uint64_t _allocations)
+    : name(_name), share(_share), allocations(_allocations) {}
+
+  std::string name;
+  double share;
+
+  // We store the number of times this client has been chosen for
+  // allocation so that we can fairly share the resources across
+  // clients that have the same share. Note that this information is
+  // not persisted across master failovers, but since the point is to
+  // equalize the 'allocations' across clients of the same 'share'
+  // having allocations restart at 0 after a master failover should be
+  // sufficient (famous last words.)
+  uint64_t allocations;
+};
+```
+
+DRFComparator结构封装了一个括号运算符，实际是一个比较器，对两个用户进行比较，比较的优先级顺序是share、allocations、name:
+```
+struct DRFComparator
+{
+  virtual ~DRFComparator() {}
+  virtual bool operator()(const Client& client1, const Client& client2);
+};
+```
+
+DRFSorter类是主要功能类，也是Sorter类的子类，后者在[/src/master/allocator/sorter/sorter.hpp](../mesos-1.1.0/mesos-1.1.0/src/master/allocator/sorter/worter.hpp)中定义，主要包括了一些维护client和resource集合的虚函数，比如add、remove、update等，以及client的排序函数sort。
+
+DRFSorter类中``private``包括的属性有:
+
+* fairnessExcludeResourceNames：不参与分配的资源
+* clients：client集合，是一个c++的set结构（实际底层是一个红黑树，将自动排序），比较器是之前提到的DRFComparator
+* weights：一个哈希表，指定了每个client的权值
+* total_：一个结构体，封装了所有资源
+* allocations：一个哈希表，指定了每个client被分配的资源
+
+
+sorter.cpp文件是上述sorter.hpp中函数的具体实现。
+
+###### hierarchical.hpp、hierarchical.cpp
+
+从文件名上看即可以知道这个分配器是一个层次化的分配器，主要类是``HierarchicalAllocatorProcess``，定义在hierarchical.hpp中。该分配器的分配过程包括两个stage：
+
+* 第一个stage资源仅仅分配给有配额（quota）的角色（role）的framework
+* 第二个stage剩下的资源不要求满足剩余未分配的配额，因此可以分配给所有的framework
+
+而每一个stage又分为另个level：
+
+* Level 1：根据角色排序
+* Level 2：在每个特定角色中根据framework排序
+
+构造函数如下:
+```
+  HierarchicalAllocatorProcess(
+      const std::function<Sorter*()>& roleSorterFactory,
+      const std::function<Sorter*()>& _frameworkSorterFactory,
+      const std::function<Sorter*()>& quotaRoleSorterFactory)
+    : initialized(false),
+      paused(true),
+      metrics(*this),
+      roleSorter(roleSorterFactory()),
+      quotaRoleSorter(quotaRoleSorterFactory()),
+      frameworkSorterFactory(_frameworkSorterFactory) {}
+```
+其中初始化了三个DRFSorter，role、quota和framework分别对应针对角色的sorter，针对有配额角色的sorter以及每一个role都有一个的针对framework的sorter，通过不同的sorter可以满足层次化的需求。
+
+分配的过程主要在``HierarchicalAllocatorProcess::updateAllocation()``函数中，代码如下：
+```
+void HierarchicalAllocatorProcess::updateAllocation(
+    const FrameworkID& frameworkId,
+    const SlaveID& slaveId,
+    const Resources& offeredResources,
+    const vector<Offer::Operation>& operations)
+{
+  CHECK(initialized);
+  CHECK(slaves.contains(slaveId));
+  CHECK(frameworks.contains(frameworkId));
+
+  const string& role = frameworks[frameworkId].role;
+  CHECK(frameworkSorters.contains(role));
+
+  const Owned<Sorter>& frameworkSorter = frameworkSorters[role];
+
+  // We keep a copy of the offered resources here and it is updated
+  // by the operations.
+  Resources _offeredResources = offeredResources;
+
+  foreach (const Offer::Operation& operation, operations) {
+    Try<Resources> updatedOfferedResources = _offeredResources.apply(operation);
+    CHECK_SOME(updatedOfferedResources);
+    _offeredResources = updatedOfferedResources.get();
+
+    if (operation.type() == Offer::Operation::LAUNCH) {
+      // Additional allocation needed for the operation.
+      //
+      // For LAUNCH operations we support tasks requesting more
+      // instances of shared resources than those being offered. We
+      // keep track of these additional instances and allocate them
+      // as part of updating the framework's allocation (i.e., add
+      // them to the allocated resources in the allocator and in each
+      // of the sorters).
+      Resources additional;
+
+      hashset<TaskID> taskIds;
+
+      foreach (const TaskInfo& task, operation.launch().task_infos()) {
+        taskIds.insert(task.task_id());
+
+        // For now we only need to look at the task resources and
+        // ignore the executor resources.
+        //
+        // TODO(anindya_sinha): For simplicity we currently don't
+        // allow shared resources in ExecutorInfo. The reason is that
+        // the allocator has no idea if the executor within the task
+        // represents a new executor. Therefore we cannot reliably
+        // determine if the executor resources are needed for this task.
+        // The TODO is to support it. We need to pass in the information
+        // pertaining to the executor before enabling shared resources
+        // in the executor.
+        const Resources& consumed = task.resources();
+        additional += consumed.shared() - _offeredResources.shared();
+
+        // (Non-shared) executor resources are not removed from
+        // _offeredResources but it's OK because we only care about
+        // shared resources in this variable.
+        _offeredResources -= consumed;
+      }
+
+      if (!additional.empty()) {
+        LOG(INFO) << "Allocating additional resources " << additional
+                  << " for tasks " << stringify(taskIds);
+
+        CHECK_EQ(additional.shared(), additional);
+
+        const Resources frameworkAllocation =
+          frameworkSorter->allocation(frameworkId.value(), slaveId);
+
+        foreach (const Resource& resource, additional) {
+          CHECK(frameworkAllocation.contains(resource));
+        }
+
+        // Allocate these additional resources to this framework. Because
+        // they are merely additional instances of the same shared
+        // resources already allocated to the framework (validated by the
+        // master, see the CHECK above), this doesn't have an impact on
+        // the allocator's allocation algorithm.
+        slaves[slaveId].allocated += additional;
+
+        frameworkSorter->add(slaveId, additional);
+        frameworkSorter->allocated(frameworkId.value(), slaveId, additional);
+        roleSorter->allocated(role, slaveId, additional);
+
+        if (quotas.contains(role)) {
+          quotaRoleSorter->allocated(
+              role, slaveId, additional.nonRevocable());
+        }
+      }
+
+      continue;
+    }
+
+    // Here we apply offer operations to the allocated and total
+    // resources in the allocator and each of the sorters. The available
+    // resource quantities remain unchanged.
+
+    // Update the per-slave allocation.
+    Try<Resources> updatedSlaveAllocation =
+      slaves[slaveId].allocated.apply(operation);
+
+    CHECK_SOME(updatedSlaveAllocation);
+
+    slaves[slaveId].allocated = updatedSlaveAllocation.get();
+
+    // Update the total resources.
+    Try<Resources> updatedTotal = slaves[slaveId].total.apply(operation);
+    CHECK_SOME(updatedTotal);
+
+    slaves[slaveId].total = updatedTotal.get();
+
+    // Update the total and allocated resources in each sorter.
+    Resources frameworkAllocation =
+      frameworkSorter->allocation(frameworkId.value(), slaveId);
+
+    Try<Resources> updatedFrameworkAllocation =
+      frameworkAllocation.apply(operation);
+
+    CHECK_SOME(updatedFrameworkAllocation);
+
+    // Update the total and allocated resources in the framework sorter
+    // for the current role.
+    frameworkSorter->remove(slaveId, frameworkAllocation);
+    frameworkSorter->add(slaveId, updatedFrameworkAllocation.get());
+
+    frameworkSorter->update(
+        frameworkId.value(),
+        slaveId,
+        frameworkAllocation,
+        updatedFrameworkAllocation.get());
+
+    // Update the total and allocated resources in the role sorter.
+    roleSorter->remove(slaveId, frameworkAllocation);
+    roleSorter->add(slaveId, updatedFrameworkAllocation.get());
+
+    roleSorter->update(
+        role,
+        slaveId,
+        frameworkAllocation,
+        updatedFrameworkAllocation.get());
+
+    // Update the total and allocated resources in the quota role
+    // sorter. Note that we always update the quota role sorter's total
+    // resources; we only update its allocated resources if this role
+    // has quota set.
+    quotaRoleSorter->remove(slaveId, frameworkAllocation.nonRevocable());
+    quotaRoleSorter->add(
+        slaveId, updatedFrameworkAllocation.get().nonRevocable());
+
+    if (quotas.contains(role)) {
+      // See comment at `quotaRoleSorter` declaration regarding non-revocable.
+      quotaRoleSorter->update(
+          role,
+          slaveId,
+          frameworkAllocation.nonRevocable(),
+          updatedFrameworkAllocation.get().nonRevocable());
+    }
+
+    LOG(INFO) << "Updated allocation of framework " << frameworkId
+              << " on agent " << slaveId
+              << " from " << frameworkAllocation
+              << " to " << updatedFrameworkAllocation.get() << " with "
+              << operation.Type_Name(operation.type()) << " operation";
+  }
+}
+
+```
+
+
+
 
 ## 5. 写一个完成简单工作的框架(语言自选，需要同时实现scheduler和executor)并在Mesos上运行，在报告中对源码进行说明并附上源码，本次作业分数50%在于本项的完成情况、创意与实用程度。（后面的参考资料一定要读，降低大量难度）
