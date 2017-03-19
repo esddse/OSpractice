@@ -623,3 +623,7 @@ void HierarchicalAllocatorProcess::updateAllocation(
 
 
 ## 5. 写一个完成简单工作的框架(语言自选，需要同时实现scheduler和executor)并在Mesos上运行，在报告中对源码进行说明并附上源码，本次作业分数50%在于本项的完成情况、创意与实用程度。（后面的参考资料一定要读，降低大量难度）
+
+因为我对python比较熟悉，因此选用了[PyMesos](https://github.com/douban/pymesos)，这是Mesos HTTP API的python语言封装，由国内豆瓣公司完成。
+
+然而比较麻烦的一点是并没有文档和说明。
