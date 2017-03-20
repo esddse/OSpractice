@@ -86,15 +86,15 @@ master目录中和初始化流程有关的文件是[main.cpp](../mesos-1.1.0/mes
 
 ```
 Master* master =
-	  new Master(
-      	allocator.get(),
-      	registrar,
-      	&files,
-      	contender,
-      	detector,
-      	authorizer_,
-      	slaveRemovalLimiter,
-      	flags);
+    new Master(
+        allocator.get(),
+        registrar,
+        &files,
+        contender,
+        detector,
+        authorizer_,
+        slaveRemovalLimiter,
+        flags);
 ```
 创建完后为了还需要将其启动(spawn函数)，并且等待master进程结束(wait函数)。这里的process就是在上文中说到的libprocess中定义的process，而不是简单的进程。
 ```
@@ -626,4 +626,229 @@ void HierarchicalAllocatorProcess::updateAllocation(
 
 因为我对python比较熟悉，因此选用了[PyMesos](https://github.com/douban/pymesos)，这是Mesos HTTP API的python语言封装，由国内豆瓣公司完成。
 
-然而比较麻烦的一点是并没有文档和说明。
+然而比较麻烦的一点是并没有文档和说明，在很多层面都造成了不少的麻烦。
+
+我基于PyMesos实现了一个比较简单的框架，可以完成简单的word count的功能，当然性能上感觉比起Spark还是差不少。框架改编自PyMesos自带的[example](./pymesos/examples)，example仅仅架起来了一个scheduler不断向executor分配task的框架。我将其功能扩展了，总共包括三个文件:
+
+* [my_wordcount.py](./my_wordcount.py):包括main函数，程序启动的入口。
+* [my_scheduler.py](./my_scheduler.py):包括scheduler的类定义，和一个读取文件的函数
+* [my_executor.py](./my_executor.py):包括executor的类定义
+
+#### my_wordcount.py
+
+主要步骤如下：
+```
+    # init driver
+    driver = MesosSchedulerDriver(
+        MyScheduler(executor),
+        framework,
+        master,
+        use_addict=True,
+    )
+
+    # set Ctrl+C handler, stop the driver
+    def signal_handler(signal, frame):
+        driver.stop()
+
+    # run driver
+    def run_driver_thread():
+        driver.run()
+
+    # init scheduler thread and run
+    driver_thread = Thread(target=run_driver_thread, args=())
+    driver_thread.start()
+
+    # Ctrl+C => stop
+    ('Scheduler running, Ctrl+C to quit.')
+    signal.signal(signal.SIGINT, signal_handler)
+
+    # keep alive
+    while driver_thread.is_alive():
+        time.sleep(1)
+```
+先是初始化scheduler驱动，这个驱动继承了Process，总的来说就是管理scheduler底层的、和进程、通信相关的事物。MyScheduler是我在my_scheduler.py中定义的scheduler类，executer和framework实际上都是一些json数据，是之前配置好executor和framework的参数，比如executor的id、占用资源，framework的名字、主机名等，还有一个重要的配置是executor的源代码文件存放位置（这一点很奇怪貌似PyMesos是通过这个运行executor的，暂时没有去看具体机制）。master是在命令行中输入的ip地址，是Mesos Master的地址。
+
+接下来是设置Ctrl+C退出以及运行该进程。
+
+最后让scheduler一直跑（退出在后面会提到，我觉得我这里做得还不够简洁美观）。
+
+#### my_scheduler.py
+
+scheduler的类定义如下：
+```
+class MyScheduler(Scheduler):
+
+    def __init__(self, executor):
+        # executor
+        self.executor = executor
+        # some flags
+        self.task_launched = 0
+        self.task_finished = 0
+        self.task_merged = 0
+        # data
+        self.datas = readData()
+        self.word_count = {}
+
+    # print out the counted words
+    def printWordCount(self):
+        for word, num in self.word_count.items():
+            print(word, ' ', num)
+
+    # invoked when resources have been offered to this framework
+    def resourceOffers(self, driver, offers):
+        filters = {'refuse_seconds': 5}
+
+        # if all tasks have been launched, return directly 
+        if self.task_launched == TASK_NUM:
+            return 
+
+        # for every offer
+        for offer in offers:
+            # check if the offer satisfy the requirments
+            cpus = self.getResource(offer.resources, 'cpus')
+            mem = self.getResource(offer.resources, 'mem')
+            if cpus < TASK_CPU or mem < TASK_MEM:
+                continue
+
+            # config a new task
+            task = Dict()
+            task_id = str(uuid.uuid4())
+            task.task_id.value = task_id
+            task.agent_id.value = offer.agent_id.value
+            task.name = 'task {}'.format(task_id)
+            task.executor = self.executor
+            #task.data = encode_data(bytes('Hello from task {}!'.format(task_id), 'utf-8'))
+            task.data = encode_data(bytes('ThisIsASeparator'.join(self.datas[self.task_launched]), 'utf-8'))
+
+            task.resources = [
+                dict(name='cpus', type='SCALAR', scalar={'value': TASK_CPU}),
+                dict(name='mem', type='SCALAR', scalar={'value': TASK_MEM}),
+            ]
+
+            # launch task
+            driver.launchTasks(offer.id, [task], filters)
+
+            self.task_launched += 1
+
+    # receive task result
+    def frameworkMessage(self, driver, executorId, slaveId, message):
+        # merge task result
+        result = decode_data(message).decode().split('ThisIsAnOuterSeparator')
+        for item in result:
+            item = item.split('ThisIsAnInnerSeparator')
+            if item[0] in self.word_count:
+                self.word_count[item[0]] += int(item[1])
+            else:
+                self.word_count[item[0]] = int(item[1])
+        self.task_merged += 1
+
+    def getResource(self, res, name):
+        for r in res:
+            if r.name == name:
+                return r.scalar.value
+        return 0.0
+
+    # invoked when the status of a task has changed
+    # eg: executorDriver call sendStateUpdate()
+    def statusUpdate(self, driver, update):
+        # log
+        logging.debug('Status update TID %s %s',
+                      update.task_id.value,
+                      update.state)
+
+        # check if task finished
+        if update.state == 'TASK_FINISHED':
+            self.task_finished += 1
+            # check if all tasks are finished
+            if self.task_finished == TASK_NUM and self.task_merged == TASK_NUM:
+                self.printWordCount()
+                print('all tasks are finished, exit!')
+                exit(0)
+```
+在初始化时设置了几个标志位，scheduler的控制基本是靠这几个标志位实现的。以及直接读取了数据，还有为结果创建了数据结构。
+
+resourceOffers是主要的接收资源offer和运行task的函数。首先判断，若已经运行的task和期望的task数量已经相等，既不接收资源也不运行新task，直接返回。然后对每一个offer，检查offer的资源是否满足一个task的需求，不满足直接跳过。然后就是创建一个新task，并且在offer给定的硬件上运行task。刷新计数。
+
+frameworkMessage函数接收从executor发送的执行结果，一旦收到executor的信息，该函数就会启动。主要功能是合并task结果到本地的结果数据中。
+
+另外，整个程序的出口在statusUpdate中，一旦发现指定数量的task都完成，并且合并也完成了，输出所有结果，然后退出。
+
+对每个task的资源分配，可以通过全局变量来进行设置。
+
+#### my_executor.py
+
+类定义如下：
+```
+class MyExecutor(Executor):
+
+    def launchTask(self, driver, task):
+        def run_task(task):
+            # config start state
+            update = Dict()
+            update.task_id.value = task.task_id.value
+            update.state = 'TASK_RUNNING'
+            update.timestamp = time.time()
+            driver.sendStatusUpdate(update)
+
+
+            # word count
+            # ----------------------------------------
+            # data preparation
+            words = decode_data(task.data).decode().split('ThisIsASeparator')
+            
+            # count words 
+            word_count = {}
+            for word in words:
+                if word in word_count:
+                    word_count[word] += 1
+                else:
+                    word_count[word] = 1
+
+            # prepare result
+            result = []
+            for word, cnt in word_count.items():
+                result.append(word+'ThisIsAnInnerSeparator'+str(cnt))           
+            result = 'ThisIsAnOuterSeparator'.join(result)       
+
+            # send result to scheduler
+            driver.sendFrameworkMessage(encode_data(bytes(result, 'utf-8')))
+            # ----------------------------------------
+            
+            # config end state
+            update = Dict()
+            update.task_id.value = task.task_id.value
+            update.state = 'TASK_FINISHED'
+            update.timestamp = time.time()
+            driver.sendStatusUpdate(update)
+
+        # run agent thread
+        thread = Thread(target=run_task, args=(task,))
+        thread.start()
+```
+
+只有一个成员函数。从外围看分两个部分，一个是run_task的函数定义，另一个是启动这个线程。然后在run_task中又分三个部分：向scheduler发送task开始运行的状态信息；统计该部分词频；向scheduler发送task结束运行的状态信息。这里统计结果发送是通过sendFrameworkMessage函数来实现的。
+
+#### 运行示例
+
+运行时资源分配:
+
+![resources](./pics/myframework.PNG)
+
+运行时Task状态:
+
+![tasks](./pics/mytasks.PNG)
+
+运行结果示例:
+
+![result](./pics/result.PNG)
+
+使用的数据是安娜卡列尼娜英文版复制50次（约90M）
+
+#### 存在的问题
+
+1. 第一个问题是程序结构上的问题，一开始希望做成scheduler和executor可以做成通用接口，随时写一个任意的程序就能在框架上跑的。但是限于自己水平的不足和对PyMesos的不了解暂时只能把业务逻辑和框架紧紧绑定在一起。
+2. 数据切分以及Task数量的确定以及资源的分配还是非常愚蠢的人工设置方式，无法做到Spark那样随分配的资源自动完成。并且在一些设置下，task的并行度根本提不上来，有时候还是一个一个运行的。
+3. 无法处理较大的数据，这可能和数据读取方式以及前面的人工设置资源分配有关。在Spark上能跑900M的数据，这边完全不行。
+4. 速度慢。有的时候由于task一个一个跑，大部分时间花在了业务逻辑以外的地方。
+
+
