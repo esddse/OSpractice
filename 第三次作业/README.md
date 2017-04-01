@@ -185,7 +185,7 @@ sudo docker network inspect my_network
 
 由于我的宿主机没有图形界面，为了看到显示的效果，我通过保存的镜像重新创建一个容器，将容器的80端口映射到宿主机的80端口。然后通过浏览器访问结果如下:
 
-![nginx_result](nginx_result.PNG)
+![nginx_result](./pics/nginx_result.PNG)
 
 ## 4. Docker网络模式
 
