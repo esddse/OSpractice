@@ -187,6 +187,10 @@ sudo docker network inspect my_network
 
 ![nginx_result](./pics/nginx_result.PNG)
 
+容器内新增log如下:
+
+![log](./pics/log.PNG)
+
 ## 4. Docker网络模式
 
 #### 默认网络
@@ -199,16 +203,170 @@ sudo docker network inspect my_network
 
 bridge 网络表示所有 Docker 安装中都存在的 docker0 网络。除非使用 docker run –net=选项另行指定，否则 Docker 守护进程默认情况下会将容器连接到此网络。在主机上使用 ifconfig命令，可以看到此网桥是主机的网络堆栈的一部分。
 
-#### none 网络
+#### null 网络
 
-none 网络在一个特定于容器的网络堆栈上添加了一个容器。该容器缺少网络接口。
+null 网络在一个特定于容器的网络堆栈上添加了一个容器。该容器不做任何网络配置，缺少网络接口。
 
 #### host 网络
 
-host 网络在主机堆栈上添加了一个容器。你可以发现容器中的网络配置和主机相同。
+host 网络在主机堆栈上添加了一个容器。你可以发现容器中的网络配置和主机相同。host
+网络和主机共享一个network namespace。
 
 #### overlay 网络
 
+overlay 网络在 Docker 1.9 版本中正式加入，是官方支持的跨结点通信方案。overlay网络在不改变现有网络基础设施的前提下，通过某种约定通信协议，把二层报文封装在IP报文之上的新的数据格式
+
 ## 5. Docker与Mesos交互
 
-## 6. framework
+Mesos支持使用 Docker 容器作为一个 Task 或者一个 Executor
+
+* 当以 Task 方式运行时。需要在 Taskinfo 中设置 command 和 container 域。Containerinfo 中需要包含 Docker 类型，同时 Dockerinfo要提供所需容器的镜像名。
+* 当以 Executor 方式运行时。 Taskinfo 中必须设置 Executorinfo 包含一个 Containerinfo，且这个 Containerinfo 的类型时 docker。同时 Commandinfo 要设成相关的命令启动 executor。
+
+Mesos 中与 Docker 交互的代码在``/mesos/src/docker``中
+
+#### docker.hpp
+
+该头文件中定义了 Docker 类，Docker 类中又有 Container 和 Image 内部类。包含了 Docker 的镜像和容器两大部分。
+
+#### docker.cpp
+
+该文件实现了Docker类中的大部分成员函数，实际上是根据配置组成Docker的各个命令行命令。Mesos通过这种方式，使用Docker CLI与Docker交互。
+
+docker::run() 函数实际上相当于构成并执行``docker run IMAGE``命令，在函数中实际上是不断检查参数，并转换为适当命令格式，最后执行。函数做的事情如下:
+* 检查docker信息
+* 加入socket参数
+* 加入run关键字
+* 检查是否特权，如果是加入命令参数
+* 检查资源分配，命令中加入资源分配
+* 检查环境变量
+* 配置docker volume
+* 配置docker 网络
+* 配置主机
+* 配置端口映射
+* 配置主机分区挂载
+* 配置entrypoint
+* 名字
+* 最后创建一个子进程通过上述形成的命令形成容器
+
+## 6. 写一个framework，用容器方式运行task
+
+#### 1. 修改mesos-agent的启动命令
+
+![mesos_agent](mesos_agent.PNG)
+
+#### 2. 写framework
+
+见文件[my_nginx.py](./my_nginx.py)和[my_scheduler.py](./my_scheduler.py)
+
+由pymesos提供的API写成，整体架构依然和pymesos给出的exmaple一样，主要是scheduler的变化。scheduler.py的代码如下:
+```
+import re
+import sys
+import uuid
+import logging
+import time
+import socket
+import signal
+import getpass
+from threading import Thread
+from os.path import abspath, join, dirname
+
+from pymesos import MesosSchedulerDriver, Scheduler, encode_data, decode_data
+from addict import Dict
+
+TASK_CPU = 0.1
+TASK_MEM = 96
+TASK_NUM = 1
+
+EXECUTOR_CPUS = 0.5
+EXECUTOR_MEM = 192
+
+
+class MyScheduler(Scheduler):
+
+    def __init__(self):
+        self.task_launched = 0
+
+
+    # invoked when resources have been offered to this framework
+    def resourceOffers(self, driver, offers):
+        filters = {'refuse_seconds': 5}
+
+        # if all tasks have been launched, return directly 
+        if self.task_launched == TASK_NUM:
+            return 
+
+        # for every offer
+        for offer in offers:
+            # check if the offer satisfy the requirments
+            cpus = self.getResource(offer.resources, 'cpus')
+            mem = self.getResource(offer.resources, 'mem')
+            if cpus < TASK_CPU or mem < TASK_MEM:
+                continue
+
+            # config a new task
+            task = Dict()
+            task_id = str(uuid.uuid4())
+            task.task_id.value = task_id
+            task.agent_id.value = offer.agent_id.value
+            task.name = 'nginx'
+            # container
+            task.container.type='DOCKER'
+            task.container.docker.image = 'esddse/my_nginx'
+            task.container.docker.network = 'HOST'
+            # command 
+            task.command.shell = False
+            task.command.value = '/usr/local/nginx/sbin/nginx'
+            task.command.arguments=['-g','daemon off;']
+
+
+            task.resources = [
+                dict(name='cpus', type='SCALAR', scalar={'value': TASK_CPU}),
+                dict(name='mem', type='SCALAR', scalar={'value': TASK_MEM}),
+            ]
+
+            # launch task
+            driver.launchTasks(offer.id, [task], filters)
+
+            self.task_launched += 1
+
+
+    def getResource(self, res, name):
+        for r in res:
+            if r.name == name:
+                return r.scalar.value
+        return 0.0
+
+    # invoked when the status of a task has changed
+    # eg: executorDriver call sendStateUpdate()
+    def statusUpdate(self, driver, update):
+        # log
+        logging.debug('Status update TID %s %s',
+                      update.task_id.value,
+                      update.state)
+
+```
+
+主要改动在于中间对task的设置:
+```
+# 这三句指定了container为Docker，并且指定了使用的镜像和网络
+task.container.type='DOCKER'
+task.container.docker.image = 'esddse/my_nginx'
+task.container.docker.network = 'HOST'
+
+# 这使容器创建后，用守护进程方式运行nginx，不加``-g deamon off``的话会使容器提前退出
+task.command.shell = False
+task.command.value = '/usr/local/nginx/sbin/nginx'
+task.command.arguments=['-g','daemon off;']
+```
+#### 3. 运行结果
+
+![mesos_task](./pics/mesos_task.PNG)
+
+![mesos_nginx](./mesos_nginx.PNG)
+
+后面的网站可以通过网址([123.207.164.155](http://123.207.164.155))访问
+
+
+
