@@ -253,7 +253,7 @@ docker::run() 函数实际上相当于构成并执行``docker run IMAGE``命令�
 
 #### 1. 修改mesos-agent的启动命令
 
-![mesos_agent](mesos_agent.PNG)
+![mesos_agent](./pics/mesos_agent.PNG)
 
 #### 2. 写framework
 
@@ -364,7 +364,7 @@ task.command.arguments=['-g','daemon off;']
 
 ![mesos_task](./pics/mesos_task.PNG)
 
-![mesos_nginx](./mesos_nginx.PNG)
+![mesos_nginx](./pics/mesos_nginx.PNG)
 
 后面的网站可以通过网址([123.207.164.155](http://123.207.164.155))访问
 
