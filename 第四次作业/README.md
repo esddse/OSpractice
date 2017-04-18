@@ -390,7 +390,7 @@ e95e8d96321fd5774dd3836a7877ba523b6a729f91c888bdbd75021a98273638
 179e3e98b8ce1fb40c70e410140bfdf4f6a14f66e4321c4073fbd655e5ae856d
 aba1defd56fddc42e8b1c5b79138d834438793ce504a261f075f1b17cb6b3708
 ```
-其中``8bca753``是最上层的读写层，而``8bca753-init``是init layer （可以对应前面Docker成像机制的图）
+其中``8bca753e8daa846e5828a673f40803f9d4e3e94150aced28823370b5c0a8114b``是最上层的读写层，而``8bca753e8daa846e5828a673f40803f9d4e3e94150aced28823370b5c0a8114b-init``是init layer （可以对应前面Docker镜像机制的图）
 
 文件均存放在``/var/lib/docker/aufs/diff``中，进入该目录并且保存相应层，其中init层和容器创建有关，不需要保存。将读写层保存为新镜像的最上层。
 ```
