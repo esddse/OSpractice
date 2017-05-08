@@ -299,7 +299,7 @@ weave通过在docker集群的每个主机上启动虚拟的路由器，将主机
 
 当容器通过weave进行跨主机通信时，其网络通信模型可以参考下图： 
 
-![weave_model](./pics/weave_model)
+![weave_model](./pics/weave_model.PNG)
 
 从上面的网络模型图中可以看出，对每一个weave网络中的容器，weave都会创建一个网桥，并且在网桥和每个容器之间创建一个veth pair，一端作为容器网卡加入到容器的网络命名空间中，并为容器网卡配置ip和相应的掩码，一端连接在网桥上，最终通过宿主机上weave router将流量转发到对端主机上。其基本过程如下：
 
