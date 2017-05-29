@@ -343,7 +343,7 @@ etcd --name 1001 --initial-advertise-peer-urls http://172.16.1.172:2380 \
   --listen-client-urls http://172.16.1.172:2379,http://127.0.0.1:2379 \
   --advertise-client-urls http://172.16.1.172:2379 \
   --initial-cluster-token etcd-cluster-1 \
-  --initial-cluster 1001=http://172.16.1.172:2380,1002=http://172.16.1.113:2380,1003=http://10.0.1.12:2380 \
+  --initial-cluster 1001=http://172.16.1.172:2380,1002=http://172.16.1.113:2380,1003=http://172.16.1.157:2380 \
   --initial-cluster-state new &
 ```
 1002:
@@ -354,7 +354,7 @@ etcd --name 1002 --initial-advertise-peer-urls http://172.16.1.113:2380 \
   --listen-client-urls http://172.16.1.113:2379,http://127.0.0.1:2379 \
   --advertise-client-urls http://172.16.1.113:2379 \
   --initial-cluster-token etcd-cluster-1 \
-  --initial-cluster 1001=http://172.16.1.172:2380,1002=http://172.16.1.113:2380,1003=http://10.0.1.12:2380 \
+  --initial-cluster 1001=http://172.16.1.172:2380,1002=http://172.16.1.113:2380,1003=http://172.16.1.157:2380 \
   --initial-cluster-state new &
 ```
 1003:
@@ -388,7 +388,7 @@ cluster is healthy
 在每一台主机上配置docker daemon，使docker支持etcd
 
 ```
-dockerd --cluster-store etcd://172.16.1.176:2379 &
+dockerd --cluster-store etcd://172.16.1.172:2379 &
 ```
 
 #### 安装calico
@@ -544,7 +544,7 @@ CMD ["jupyter","notebook","--NotebookApp.token=","--ip=192.168.0.1"]
 nohup configurable-http-proxy --default-target=http://192.168.0.1:8888 --ip=172.16.1.113 --port=8888 &
 
 # 在1003上
-nohup configurable-http-proxy --default-target=http://192.168.0.1:8888 --ip=172.16.1.113 --port=8888 &
+nohup configurable-http-proxy --default-target=http://192.168.0.1:8888 --ip=172.16.1.157 --port=8888 &
 ```
 scheduler的总体思想是：10个task，运行10个容器，其中第一个是带jupyter的，其余只带ssh。当分配第一个task时，查看offer来的资源是从那个agent来的，在master（master就是和外网端口映射的机器）上建立端口映射，映射到对应agent机器，然后用jupyter镜像制作容器。剩下的task都使用ssh镜像制作容器。
 
@@ -726,7 +726,6 @@ class MyScheduler(Scheduler):
 
 下面是运行结果：
 
-mesos运行状态图，一个奇怪的地方是task2和3无论如何都会fail，暂时没有解决
 
 ![mesos](./pics/mesos.PNG)
 
