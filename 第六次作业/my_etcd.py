@@ -2,7 +2,7 @@ import sys
 import logging
 
 from addict import Dict
-from my_scheduler import *
+from my_scheduler_etcd import *
 
 
 
@@ -11,7 +11,7 @@ def main(master):
     # config framework
     framework = Dict()
     framework.user = getpass.getuser()
-    framework.name = "my_calico"
+    framework.name = "my_etcd"
     framework.hostname = socket.gethostname()
 
     # init driver

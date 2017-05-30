@@ -151,3 +151,340 @@ I0528 09:38:14.519642  2102 master.cpp:2137] The newly elected leader is master@
 ```
 
 ## 4. 综合作业：docker容器集群
+
+本次作业集群需要初始化的启动项非常多，我从业务上将其分为以下几块：
+1. 容器启动逻辑
+2. 容器集群网络的搭建，包括内部端口的转发等
+3. 共享分布式文件系统
+4. ssh免密码登录
+5. etcd集群与容错机制
+
+在具体实现中这些部分是交织在一起的，我会尽可能分开说明。
+
+#### 容器启动逻辑
+
+scheduler核心代码
+
+```
+            # volume,glusterfs挂载到容器目录
+            volume = Dict()
+            volume.key = 'volume'
+            volume.value = '/home/pkusei/workspace/gluster/mnt:/root/shared'
+            
+
+            # network，上次作业的calico网络
+            networkInfo = Dict()
+            networkInfo.name = 'calico_test_net'
+
+            # ip
+            ip = Dict()
+            ip.key = 'ip'
+            ip.value = '192.168.0.' + str(self.task_launched+1)
+
+            # docker
+            dockerInfo = Dict()
+            dockerInfo.image = 'esddse/etcd'
+            dockerInfo.network = 'USER'
+            dockerInfo.parameters = [ip,volume]
+
+            # container
+            containerInfo = Dict()
+            containerInfo.type = 'DOCKER'
+            containerInfo.docker = dockerInfo
+            containerInfo.network_infos = [networkInfo]
+
+            # task
+            commandInfo = Dict()
+            commandInfo.shell = False
+
+            task = Dict()
+            task_id = str(self.task_launched+1)
+            task.task_id.value = task_id
+            task.agent_id.value = offer.agent_id.value
+            task.name = 'etcd'
+            task.container = containerInfo
+            task.command = commandInfo
+```
+
+Dockerfile如下，最后的命令是运行一个python程序，因为要设置的项太多。python具有简洁易用、功能强大的优点，甚至能很好地与shell脚本相互支撑。
+
+```
+FROM ubuntu:latest
+
+# 安装ssh和jupyter
+RUN apt-get update
+RUN apt-get install -y ssh python3-pip
+RUN pip3 install jupyter
+
+# 安装一些工具
+RUN apt-get install -y python3
+RUN apt-get install -y net-tools
+RUN apt-get install -y curl
+RUN apt-get install -y vim
+
+# 安装etcd
+RUN apt-get install -y etcd
+
+# 尝试使用root登陆，因为访问共享目录需要root权限
+# 修改root密码
+RUN echo "root:root" | chpasswd
+
+# 创建共享目录，glusterfs的挂载点
+RUN mkdir /root/shared
+
+# 配置sshd，解除root的禁止登录，以及设置密钥读取的目录
+RUN mkdir /var/run/sshd
+RUN echo "AuthorizedKeysFile /root/shared/authorized_keys" >> /etc/ssh/sshd_config
+RUN sed -n '/PermitRootLogin/d' /etc/ssh/sshd_config
+RUN echo "PermitRootLogin yes" >> /etc/ssh/sshd_config
+
+
+# 复制初始化程序
+ADD init/ /root/init
+
+# 开放22端口并前台运行jupyter
+USER root
+EXPOSE 22
+WORKDIR /root
+CMD ["python3","/root/init/init.py"]
+```
+
+init程序的主要业务逻辑如下:
+
+```
+def main():
+
+	# 得到容器ip
+	ip = get_ip()
+    
+	# 初始化etcd
+	init_etcd(ip)
+    
+	# 产生密钥,并放到共享文件当中
+	gen_ssh_key(ip)
+    
+	# 初始化etcd监视者，监视etcd存储的值有没有发生变化
+	init_watcher()
+    
+	# 循环，检查自身状态（是master还是follower）并写入etcd
+	etcd_loop(ip)
+	
+```
+
+
+#### calico容器网络
+
+容器的ip以及容器间的网络直接使用了上一次作业配置的网络。本次作业我使用3个容器组成集群，ip地址分别为:``192.168.0.1``、``192.168.0.2``、``192.168.0.3``。
+
+不同于上次作业的是，由于jupyter notebook只在etcd master上部署，其代理机制更为复杂。我使用1001作为mesos master，1002和1003作为mesos agent，这样需要三段代理：
+1. 1002和1003搜索运行在其上的容器中有没有master，若有，转发其8888端口到本机
+2. 1001搜索master在1002还是1003上，转发8888端口
+3. 1001和外网的端口转发
+
+探测的依据可以是``ip_addr:8888/tree``，因为etcd master容器会运行jupyter notebook，开放了该url。非master容器该url无法访问。
+
+此外，由于故障等因素etcd master随时可能转移，因此需要使用循环不断进行搜索。
+
+```
+
+HOST_1 = '172.16.1.172'
+HOST_2 = '172.16.1.113'
+HOST_3 = '172.16.1.157'
+
+
+def get_ip():
+	f = os.popen("ifconfig ens32 | grep 'inet addr' | awk '{ print $2}' | awk -F: '{print $2}' ")
+	return f.read().strip()
+
+
+# 判断master是否在ip上
+def master_in_(ip):
+	jupyter_url = 'http://' + ip + ':8888/tree'
+	request = urllib.request.Request(jupyter_url)
+	try:
+		f = urllib.request.urlopen(request)
+	except:
+		return False
+	else:
+		print('master running on ' + ip)
+		return True
+
+def set_proxy(ip1, ip2):
+	args = ['configurable-http-proxy', 
+			'--default-target=http://' + ip1 + ':8888', 
+			'--ip=' + ip2, '--port=8888'] 
+	return subprocess.Popen(args)
+
+# 1001的循环
+def loop_1(h_ip):
+	last_pid = None
+	last_master = -1
+	while True:
+		if master_in_(HOST_2):
+			# first time
+			if last_pid is None:
+				last_pid = set_proxy(HOST_2, h_ip)
+				last_master = HOST_2
+			# not the first time
+			elif last_master != HOST_2:
+				last_pid.kill()
+				last_pid = set_proxy(HOST_2, h_ip)
+				last_master = HOST_2
+		elif master_in_(HOST_3):
+			# first time
+			if last_pid is None:
+				last_pid = set_proxy(HOST_3, h_ip)
+				last_master = HOST_3
+			# not the first time
+			elif last_master != HOST_3:
+				last_pid.kill()
+				last_pid = set_proxy(HOST_3, h_ip)
+				last_master = HOST_3
+		elif last_pid is not None:
+			last_pid.kill()
+			last_pid = None
+			last_master = -1
+
+		time.sleep(3)
+
+# 1002和1003的循环
+def loop_23(h_ip):
+	last_pid = None
+	last_master = -1
+	have_master = False
+	while True:
+		# check every container
+		for i in range(3):
+			c_ip = '192.168.0.' + str(i+1)
+			if master_in_(c_ip):
+				have_master = True
+				# first time
+				if last_pid is None:
+					last_pid = set_proxy(c_ip, h_ip)
+					last_master = c_ip
+				# not the first time 
+				elif last_master != c_ip:
+					last_pid.kill()
+					last_pid = set_proxy(c_ip, h_ip)
+					last_master = c_ip
+
+		if not have_master and last_pid is not None:
+			last_pid.kill()
+			last_pid = None
+			last_master = -1
+
+		time.sleep(3)
+
+
+
+
+def main():
+	
+	h_ip = get_ip()
+
+	if h_ip == HOST_1:
+		loop_1(h_ip)
+	elif h_ip == HOST_2 or h_ip == HOST_3:
+		loop_23(h_ip)
+```
+
+只要在集群运行之前将此程序在三台机器上分别后台运行即可。
+
+#### 共享分布式文件系统
+
+分布式文件系统我使用的是``glusterfs``,具体配置方式和之前作业一样。
+
+具体是先创建一个复制卷，在三台机器上分别挂载到	``/mnt``目录，再在dockerfile中写明将其挂载到容器的``/root/shared``目录。这样实际上不光容器和容器之间是共享的，容器里和容器外实际也共享该目录。
+
+然而在容器中访问共享目录需要root权限，因此我在dockerfile中干脆直接使用root账号。
+
+#### ssh免密码登录
+
+实现集群容器间的相互免密码登录，实际只需要将其公钥都存在共享目录里，然后设置sshd配置文件，让其到指定目录中寻找共钥即可。
+
+生成密钥以及搬运公钥的程序如下:
+```
+def gen_ssh_key(ip):
+	os.system("ssh-keygen -t rsa -N '' -f /root/.ssh/id_rsa")
+	os.system("touch /root/shared/"+ip)
+	os.system("cat /root/.ssh/id_rsa.pub >> /root/shared/authorized_keys")
+	os.system("chmod 600 /root/shared/authorized_keys")
+	os.system("service ssh start")
+```
+
+dockerfile中设置sshd的条目如下:
+
+```
+# 配置sshd，解除root的禁止登录，以及设置密钥读取的目录
+RUN mkdir /var/run/sshd
+RUN echo "AuthorizedKeysFile /root/shared/authorized_keys" >> /etc/ssh/sshd_config
+RUN sed -n '/PermitRootLogin/d' /etc/ssh/sshd_config
+RUN echo "PermitRootLogin yes" >> /etc/ssh/sshd_config
+```
+
+设置完成后即可相互无密访问
+
+#### etcd集群与容错
+
+这一部分较难，实际上我完成得并不好。
+
+主要思路是：
+* 每个容器循环查看自己是否是etcd master，并且将自己的ip和是否是master的信息存入etcd里
+* 启动一个监视进程监视etcd相应目录，若有变化则运行程序刷新hosts文件
+
+etcd循环如下:
+```
+def etcd_loop(ip):
+	etcd_self_url = "http://" + ip + ":2379/v2/stats/self"
+	r = urllib.request.Request(etcd_self_url)
+	is_master = False
+	while True:
+		try:
+			f = urllib.request.urlopen(r)
+		except:
+			print('bad request: ' + etcd_self_url)
+		else:
+			s = json.loads(f.read().decode('utf8'))
+		
+			if s['state'] == 'StateLeader':
+				if not is_master:
+					launch_jupyter(ip)
+					os.system('etcdctl rm /etcd')
+					os.system('etcdctl mk /etcd/master/' + ip + ' ' + ip)
+					is_master = True
+				else:
+					os.system('etcdctl mk /etcd/master/' + ip + ' ' + ip)
+			else:
+				is_master = False
+				os.system('etcdctl mk /etcd/slave/' + ip + ' ' + ip)
+
+		time.sleep(1)
+```
+
+监视进程启动的hosts刷新程序如下:
+```
+def main():
+	f = os.popen('etcdctl ls --recursive /etcd')
+	lines = f.read().strip().split('\n')
+
+	with open('/etc/hosts', 'w') as f:
+		f.write('127.0.0.1  localhost\n')
+		cnt = 1
+		for line in lines:
+			line = line.split('/')
+			if len(line) == 4 and line[2] == 'master':
+				f.write(line[3] + ' etcd-0\n')
+			elif len(line) == 4 and line[2] == 'slave': 
+				f.write(line[3] + ' etcd-' + str(cnt) + '\n')
+				cnt += 1
+```
+
+监视进程本身可以通过``etcdctl``的选项实现
+
+```
+def init_watcher():
+	args = ['etcdctl', 'exec-watch', '--recursive', '/etcd', '--', 'python3', '/root/init/edit_hosts.py']
+	subprocess.Popen(args)
+```
+
+然而目前主要能在master故障的情况下恢复，由于follower故障实际并不会改变etcd键值内容因此并不会检测到。

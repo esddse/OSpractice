@@ -16,7 +16,7 @@ from addict import Dict
 
 TASK_CPU = 0.1
 TASK_MEM = 96
-TASK_NUM = 10
+TASK_NUM = 3
 
 EXECUTOR_CPUS = 0.2
 EXECUTOR_MEM = 192
@@ -40,33 +40,57 @@ class MyScheduler(Scheduler):
         for offer in offers:
             if self.task_launched == TASK_NUM:
                 return 
-            print(self.task_launched)
+            print(self.task_launched+1)
             # check if the offer satisfy the requirments
             cpus = self.getResource(offer.resources, 'cpus')
             mem = self.getResource(offer.resources, 'mem')
-
             if cpus < TASK_CPU or mem < TASK_MEM:
                 continue
+            
+            # volume
+            volume = Dict()
+            volume.key = 'volume'
+            volume.value = '/home/pkusei/workspace/gluster/mnt:/root/shared'
+            
 
-            # config a new task
+            # network
+            networkInfo = Dict()
+            networkInfo.name = 'calico_test_net'
+
+            # ip
+            ip = Dict()
+            ip.key = 'ip'
+            ip.value = '192.168.0.' + str(self.task_launched+1)
+
+            # docker
+            dockerInfo = Dict()
+            dockerInfo.image = 'esddse/etcd'
+            dockerInfo.network = 'USER'
+            dockerInfo.parameters = [ip,volume]
+
+            # container
+            containerInfo = Dict()
+            containerInfo.type = 'DOCKER'
+            containerInfo.docker = dockerInfo
+            containerInfo.network_infos = [networkInfo]
+
+            # task
+            commandInfo = Dict()
+            commandInfo.shell = False
+
             task = Dict()
-            task_id = str(uuid.uuid4())
+            task_id = str(self.task_launched+1)
             task.task_id.value = task_id
             task.agent_id.value = offer.agent_id.value
-            task.name = ''
-            # container
-            task.container.type='DOCKER'
-            task.container.docker.image = 'esddse/my_nginx'
-            task.container.docker.network = 'HOST'
-            # command 
-            task.command.shell = False
-            task.command.value = '/usr/local/nginx/sbin/nginx'
-            task.command.arguments=['-g','daemon off;']
+            task.name = 'etcd'
+            task.container = containerInfo
+            task.command = commandInfo
 
             task.resources = [
                 dict(name='cpus', type='SCALAR', scalar={'value': TASK_CPU}),
                 dict(name='mem', type='SCALAR', scalar={'value': TASK_MEM}),
             ]
+                
 
             # launch task
             driver.launchTasks(offer.id, [task], filters)
@@ -90,48 +114,3 @@ class MyScheduler(Scheduler):
 
 
 
-def main(master):
-
-    # config framework
-    framework = Dict()
-    framework.user = getpass.getuser()
-    framework.name = "my_calico"
-    framework.hostname = socket.gethostname()
-
-    # init driver
-    driver = MesosSchedulerDriver(
-        MyScheduler(),  # default executor
-        framework,
-        master,
-        use_addict=True,
-    )
-
-    # set Ctrl+C handler, stop the driver
-    def signal_handler(signal, frame):
-        driver.stop()
-
-    # run driver
-    def run_driver_thread():
-        driver.run()
-
-    # init scheduler thread and run
-    driver_thread = Thread(target=run_driver_thread, args=())
-    driver_thread.start()
-
-    # Ctrl+C => stop
-    ('Scheduler running, Ctrl+C to quit.')
-    signal.signal(signal.SIGINT, signal_handler)
-
-    # keep alive
-    while driver_thread.is_alive():
-        time.sleep(1)
-
-
-if __name__ == '__main__':
-    import logging
-    logging.basicConfig(level=logging.DEBUG)
-    if len(sys.argv) != 2:
-        print("Usage: {} <mesos_master>".format(sys.argv[0]))
-        sys.exit(1)
-    else:
-        main(sys.argv[1])

@@ -2,7 +2,7 @@ import sys
 import logging
 
 from addict import Dict
-from my_scheduler import *
+from my_scheduler_calico import *
 
 
 
