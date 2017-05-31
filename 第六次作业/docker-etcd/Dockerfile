@@ -10,6 +10,7 @@ RUN apt-get install -y python3
 RUN apt-get install -y net-tools
 RUN apt-get install -y curl
 RUN apt-get install -y vim
+RUN apt-get install -y expect
 
 # 安装etcd
 RUN apt-get install -y etcd
@@ -24,6 +25,7 @@ RUN mkdir /root/shared
 RUN mkdir /var/run/sshd
 RUN echo "AuthorizedKeysFile /root/shared/authorized_keys" >> /etc/ssh/sshd_config
 RUN sed -n '/PermitRootLogin/d' /etc/ssh/sshd_config
+RUN sed -n '/PubkeyAuthentication/d' /etc/ssh/sshd_config
 RUN echo "PermitRootLogin yes" >> /etc/ssh/sshd_config
 
 

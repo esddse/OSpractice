@@ -33,9 +33,14 @@ def launch_jupyter(ip):
 	args = ['jupyter', 'notebook', '--allow-root', '--NotebookApp.token=', '--ip='+ip]
 	subprocess.Popen(args)
 
-
+'''
 def init_watcher():
 	args = ['etcdctl', 'exec-watch', '--recursive', '/etcd', '--', 'python3', '/root/init/edit_hosts.py']
+	subprocess.Popen(args)
+'''
+
+def init_watcher():
+	args = ['python3','/root/init/watch_etcd.py']
 	subprocess.Popen(args)
 
 def etcd_loop(ip):
@@ -53,16 +58,15 @@ def etcd_loop(ip):
 			if s['state'] == 'StateLeader':
 				if not is_master:
 					launch_jupyter(ip)
-					os.system('etcdctl rm /etcd')
-					os.system('etcdctl mk /etcd/master/' + ip + ' ' + ip)
 					is_master = True
-				else:
-					os.system('etcdctl mk /etcd/master/' + ip + ' ' + ip)
+				os.system('etcdctl mk /etcd/' + ip + ' master --ttl 5')
 			else:
 				is_master = False
-				os.system('etcdctl mk /etcd/slave/' + ip + ' ' + ip)
+				os.system('etcdctl mk /etcd/' + ip + ' follower --ttl 5')
 
-		time.sleep(1)
+			#os.system('etcdctl updatedir /etcd --ttl 5')
+
+		time.sleep(0.1)
 
 def main():
 	# 得到容器ip
@@ -74,6 +78,7 @@ def main():
 	# 初始化etcd监视者
 	init_watcher()
 	# 循环，检查自身状态，写入etcd
+	#os.system('/bin/bash')
 	etcd_loop(ip)
 	
 	

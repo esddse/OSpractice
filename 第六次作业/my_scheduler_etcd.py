@@ -14,12 +14,9 @@ from os.path import abspath, join, dirname
 from pymesos import MesosSchedulerDriver, Scheduler, encode_data, decode_data
 from addict import Dict
 
-TASK_CPU = 0.1
-TASK_MEM = 96
+TASK_CPU = 0.2
+TASK_MEM = 128
 TASK_NUM = 3
-
-EXECUTOR_CPUS = 0.2
-EXECUTOR_MEM = 192
 
 
 class MyScheduler(Scheduler):

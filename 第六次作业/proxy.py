@@ -61,7 +61,7 @@ def loop_1(h_ip):
 			last_pid = None
 			last_master = -1
 
-		time.sleep(3)
+		time.sleep(0.5)
 
 
 def loop_23(h_ip):
@@ -89,7 +89,7 @@ def loop_23(h_ip):
 			last_pid = None
 			last_master = -1
 
-		time.sleep(3)
+		time.sleep(0.5)
 
 
 
