@@ -11,7 +11,7 @@ while True:
 	txt = f.read().strip()
 
 	if last_txt != txt:
-		args = ['python3', '/root/init/edit_hosts.py']
+		args = ['python3', '/home/calico/init/edit_hosts.py']
 		subprocess.Popen(args)
 		last_txt = txt
 		time.sleep(1)

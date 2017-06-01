@@ -47,7 +47,7 @@ class MyScheduler(Scheduler):
             # volume
             volume = Dict()
             volume.key = 'volume'
-            volume.value = '/home/pkusei/workspace/gluster/mnt:/root/shared'
+            volume.value = '/home/pkusei/workspace/gluster/mnt:/shared'
             
 
             # network

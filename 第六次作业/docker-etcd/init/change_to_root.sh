@@ -2,5 +2,5 @@
 
 spawn su - root
 expect "Password:"
-send "pkucloud\r"
+send "root\r"
 interact

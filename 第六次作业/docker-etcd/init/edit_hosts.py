@@ -11,7 +11,7 @@ f = os.popen('etcdctl ls --recursive /etcd')
 lines = f.read().strip().split('\n')
 
 if not lines[0].startswith('/etcd'):
-	with open('/etc/hosts', 'w') as f:
+	with open('/tmp/hosts', 'w') as f:
 		f.write('127.0.0.1  localhost\n')
 	exit() 
 
@@ -26,7 +26,7 @@ for line in lines:
 	
 dic = sorted(dic.items(), key=lambda item: item[0][-1])
 
-with open('/etc/hosts', 'w') as f:
+with open('/tmp/hosts', 'w') as f:
 	f.write('127.0.0.1  localhost\n')
 	cnt = 1
 	for item in dic:
@@ -37,4 +37,6 @@ with open('/etc/hosts', 'w') as f:
 		else:
 			f.write(ip + ' etcd-' + str(cnt) + '\n')
 			cnt += 1
+
+os.system('echo "calico" | sudo -S bash -c "cp /tmp/hosts /etc/hosts"')
 

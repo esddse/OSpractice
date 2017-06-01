@@ -23,11 +23,16 @@ def get_ip():
 	return f.read().strip()
 
 def gen_ssh_key(ip):
-	os.system("ssh-keygen -t rsa -N '' -f /root/.ssh/id_rsa")
-	os.system("touch /root/shared/"+ip)
-	os.system("cat /root/.ssh/id_rsa.pub >> /root/shared/authorized_keys")
-	os.system("chmod 600 /root/shared/authorized_keys")
-	os.system("service ssh start")
+
+	os.system("mkdir ~/.ssh")
+	os.system('echo "calico" | sudo -S bash -c "chmod 700 /home/calico/.ssh"')
+	os.system("ssh-keygen -t rsa -N '' -f ~/.ssh/id_rsa")
+	os.system('echo "calico" | sudo -S bash -c "cat ~/.ssh/id_rsa.pub >> /shared/authorized_keys"')
+	os.system('python3 /home/calico/init/wait_keys.py')
+	os.system('echo "calico" | sudo -S bash -c "cp /shared/authorized_keys ~/.ssh/authorized_keys"')
+	os.system('echo "calico" | sudo -S bash -c "chown calico: ~/.ssh/authorized_keys"')
+	os.system('echo "calico" | sudo -S bash -c "chmod 600 ~/.ssh/authorized_keys"')
+	os.system('echo "calico" | sudo -S bash -c "service ssh start"')
 
 def launch_jupyter(ip):
 	args = ['jupyter', 'notebook', '--allow-root', '--NotebookApp.token=', '--ip='+ip]
@@ -40,7 +45,7 @@ def init_watcher():
 '''
 
 def init_watcher():
-	args = ['python3','/root/init/watch_etcd.py']
+	args = ['python3','/home/calico/init/watch_etcd.py']
 	subprocess.Popen(args)
 
 def etcd_loop(ip):
