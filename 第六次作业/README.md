@@ -544,10 +544,13 @@ os.system('echo "calico" | sudo -S bash -c "cp /tmp/hosts /etc/hosts"')
 ![ssh](./pics/ssh.PNG)
 
 无密码登录成功，现在从master转移到了一个follower上
+
 另外无密码登陆成功说明共享目录的设置是正确的，共享目录的路径是``/shared``，在这里不做演示了
 
 接下来是检测容错
+
 先测试follower宕机的情况
+
 先回到master结点，再在宿主机上使用``docker stopp``命令停止一个follower容器的运行
 
 查看mesos，显示failed
@@ -562,10 +565,11 @@ os.system('echo "calico" | sudo -S bash -c "cp /tmp/hosts /etc/hosts"')
 
 ![etcd-1](./pics/etcd-1.PNG)
 
-接下来检测master宕机的情况，重新开启一个容器集群，
+接下来检测master宕机的情况，重新开启一个容器集群
+
 这是master的情况:
 
-![master](./pics/master)
+![master](./pics/master.PNG)
 
 同样，在相应的宿主机上通过``docker stop``命令停止它
 
