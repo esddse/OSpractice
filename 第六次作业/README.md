@@ -163,7 +163,7 @@ I0528 09:38:14.519642  2102 master.cpp:2137] The newly elected leader is master@
 
 #### 容器启动逻辑
 
-scheduler核心代码
+scheduler核心代码，和上次作业相比实际就是新加了Volume这一条
 
 ```
             # volume,glusterfs挂载到容器目录
@@ -221,32 +221,37 @@ RUN apt-get install -y python3
 RUN apt-get install -y net-tools
 RUN apt-get install -y curl
 RUN apt-get install -y vim
+RUN apt update
+RUN apt install sudo
 
 # 安装etcd
 RUN apt-get install -y etcd
 
-# 尝试使用root登陆，因为访问共享目录需要root权限
+# 创建ssh登录账号
+RUN useradd -ms /bin/bash calico 
+RUN adduser calico sudo
+RUN echo "calico:calico" | chpasswd
+
 # 修改root密码
 RUN echo "root:root" | chpasswd
 
 # 创建共享目录，glusterfs的挂载点
-RUN mkdir /root/shared
+RUN mkdir /shared
 
-# 配置sshd，解除root的禁止登录，以及设置密钥读取的目录
+# 配置sshd
 RUN mkdir /var/run/sshd
-RUN echo "AuthorizedKeysFile /root/shared/authorized_keys" >> /etc/ssh/sshd_config
-RUN sed -n '/PermitRootLogin/d' /etc/ssh/sshd_config
-RUN echo "PermitRootLogin yes" >> /etc/ssh/sshd_config
+RUN echo "AuthorizedKeysFile /home/calico/.ssh/authorized_keys" >> /etc/ssh/sshd_config
 
 
-# 复制初始化程序
-ADD init/ /root/init
 
-# 开放22端口并前台运行jupyter
-USER root
+# 复制初始程序
+ADD init/ /home/calico/init
+
+# 开放22端口
+USER calico
 EXPOSE 22
-WORKDIR /root
-CMD ["python3","/root/init/init.py"]
+WORKDIR /home/calico
+CMD ["python3","/home/calico/init/init.py"]
 ```
 
 init程序的主要业务逻辑如下:
@@ -263,7 +268,7 @@ def main():
 	# 产生密钥,并放到共享文件当中
 	gen_ssh_key(ip)
     
-	# 初始化etcd监视者，监视etcd存储的值有没有发生变化
+	# 初始化etcd监视者，监视etcd存储的值有没有发生变化，发生变化则写入hosts
 	init_watcher()
     
 	# 循环，检查自身状态（是master还是follower）并写入etcd
@@ -281,7 +286,7 @@ def main():
 2. 1001搜索master在1002还是1003上，转发8888端口
 3. 1001和外网的端口转发
 
-探测的依据可以是``ip_addr:8888/tree``，因为etcd master容器会运行jupyter notebook，开放了该url。非master容器该url无法访问。
+探测master是否存在的依据是能否正常连接``ip_addr:8888/tree``，因为etcd master容器会运行jupyter notebook，开放了该url。非master容器该url无法访问。
 
 此外，由于故障等因素etcd master随时可能转移，因此需要使用循环不断进行搜索。
 
@@ -296,8 +301,6 @@ def get_ip():
 	f = os.popen("ifconfig ens32 | grep 'inet addr' | awk '{ print $2}' | awk -F: '{print $2}' ")
 	return f.read().strip()
 
-
-# 判断master是否在ip上
 def master_in_(ip):
 	jupyter_url = 'http://' + ip + ':8888/tree'
 	request = urllib.request.Request(jupyter_url)
@@ -315,7 +318,6 @@ def set_proxy(ip1, ip2):
 			'--ip=' + ip2, '--port=8888'] 
 	return subprocess.Popen(args)
 
-# 1001的循环
 def loop_1(h_ip):
 	last_pid = None
 	last_master = -1
@@ -345,9 +347,9 @@ def loop_1(h_ip):
 			last_pid = None
 			last_master = -1
 
-		time.sleep(3)
+		time.sleep(0.5)
 
-# 1002和1003的循环
+
 def loop_23(h_ip):
 	last_pid = None
 	last_master = -1
@@ -373,7 +375,7 @@ def loop_23(h_ip):
 			last_pid = None
 			last_master = -1
 
-		time.sleep(3)
+		time.sleep(0.5)
 
 
 
@@ -396,40 +398,53 @@ def main():
 
 具体是先创建一个复制卷，在三台机器上分别挂载到	``/mnt``目录，再在dockerfile中写明将其挂载到容器的``/root/shared``目录。这样实际上不光容器和容器之间是共享的，容器里和容器外实际也共享该目录。
 
-然而在容器中访问共享目录需要root权限，因此我在dockerfile中干脆直接使用root账号。
+值得注意的是，访问共享目录需要root权限。
 
 #### ssh免密码登录
 
-实现集群容器间的相互免密码登录，实际只需要将其公钥都存在共享目录里，然后设置sshd配置文件，让其到指定目录中寻找共钥即可。
+实现集群容器间的相互免密码登录，关键是如何让每个容器都拥有其他容器的公钥。这一步完成后设置sshd配置文件，让其到指定目录中寻找共钥即可。
 
-生成密钥以及搬运公钥的程序如下:
+主要思想是每个容器将产生的公钥放入共享目录的一个文件当中，都放置完毕后复制到本地目录。需要注意的是，在每个容器都将公钥放入共享文件之前，任何容器都不应该复制这个文件，因此需要一个监视程序时刻监视这个共享文件。
+
+生成和搬运密钥的主要代码如下：
 ```
 def gen_ssh_key(ip):
-	os.system("ssh-keygen -t rsa -N '' -f /root/.ssh/id_rsa")
-	os.system("touch /root/shared/"+ip)
-	os.system("cat /root/.ssh/id_rsa.pub >> /root/shared/authorized_keys")
-	os.system("chmod 600 /root/shared/authorized_keys")
-	os.system("service ssh start")
+	os.system("mkdir ~/.ssh")
+	os.system('echo "calico" | sudo -S bash -c "chmod 700 /home/calico/.ssh"')
+	os.system("ssh-keygen -t rsa -N '' -f ~/.ssh/id_rsa")
+	os.system('echo "calico" | sudo -S bash -c "cat ~/.ssh/id_rsa.pub >> /shared/authorized_keys"')
+   # 监视程序，若文件公钥数量不够，卡在此步骤
+	os.system('python3 /home/calico/init/wait_keys.py')
+	os.system('echo "calico" | sudo -S bash -c "cp /shared/authorized_keys ~/.ssh/authorized_keys"')
+	os.system('echo "calico" | sudo -S bash -c "chown calico: ~/.ssh/authorized_keys"')
+	os.system('echo "calico" | sudo -S bash -c "chmod 600 ~/.ssh/authorized_keys"')
+	os.system('echo "calico" | sudo -S bash -c "service ssh start"')
 ```
 
-dockerfile中设置sshd的条目如下:
+监视代码如下:
+```
+while True:
+	f = os.popen('echo "calico" | sudo -S bash -c "wc -l /shared/authorized_keys"')
+	message = f.read().strip()
+	if message[0] == '3':
+		break
+```
+
+同时，我们需要修改``sshd_config``,使得sshd能够正确访问到我们设置的公钥位置。dockerfile中设置sshd的条目如下:
 
 ```
-# 配置sshd，解除root的禁止登录，以及设置密钥读取的目录
+配置sshd
 RUN mkdir /var/run/sshd
-RUN echo "AuthorizedKeysFile /root/shared/authorized_keys" >> /etc/ssh/sshd_config
-RUN sed -n '/PermitRootLogin/d' /etc/ssh/sshd_config
-RUN echo "PermitRootLogin yes" >> /etc/ssh/sshd_config
+RUN echo "AuthorizedKeysFile /home/calico/.ssh/authorized_keys" >> /etc/ssh/sshd_config
 ```
 
 设置完成后即可相互无密访问
 
 #### etcd集群与容错
 
-这一部分较难，实际上我完成得并不好。
 
 主要思路是：
-* 每个容器循环查看自己是否是etcd master，并且将自己的ip和是否是master的信息存入etcd里
+* 每个容器循环查看自己是否是etcd master，并且将自己的ip和是否是master的信息存入etcd里，键为ip，值为master或follower
 * 启动一个监视进程监视etcd相应目录，若有变化则运行程序刷新hosts文件
 
 etcd循环如下:
@@ -449,42 +464,121 @@ def etcd_loop(ip):
 			if s['state'] == 'StateLeader':
 				if not is_master:
 					launch_jupyter(ip)
-					os.system('etcdctl rm /etcd')
-					os.system('etcdctl mk /etcd/master/' + ip + ' ' + ip)
 					is_master = True
-				else:
-					os.system('etcdctl mk /etcd/master/' + ip + ' ' + ip)
+				os.system('etcdctl mk /etcd/' + ip + ' master --ttl 5')
 			else:
 				is_master = False
-				os.system('etcdctl mk /etcd/slave/' + ip + ' ' + ip)
+				os.system('etcdctl mk /etcd/' + ip + ' follower --ttl 5')
 
-		time.sleep(1)
+		time.sleep(0.1)
 ```
 
-监视进程启动的hosts刷新程序如下:
+监视etcd和启动hosts刷新程序的如下:
 ```
-def main():
+last_txt = None
+while True:
 	f = os.popen('etcdctl ls --recursive /etcd')
-	lines = f.read().strip().split('\n')
+	txt = f.read().strip()
 
-	with open('/etc/hosts', 'w') as f:
+	if last_txt != txt:
+		args = ['python3', '/home/calico/init/edit_hosts.py']
+		subprocess.Popen(args)
+		last_txt = txt
+		time.sleep(1)
+
+	time.sleep(5)
+```
+
+hosts刷新程序如下,为确保在每个容器中hosts名字一致，除了master结点固定命名为``etcd-0``外，其余节点按照ip地址大小排序命名:
+```
+f = os.popen('etcdctl ls --recursive /etcd')
+lines = f.read().strip().split('\n')
+
+if not lines[0].startswith('/etcd'):
+	with open('/tmp/hosts', 'w') as f:
 		f.write('127.0.0.1  localhost\n')
-		cnt = 1
-		for line in lines:
-			line = line.split('/')
-			if len(line) == 4 and line[2] == 'master':
-				f.write(line[3] + ' etcd-0\n')
-			elif len(line) == 4 and line[2] == 'slave': 
-				f.write(line[3] + ' etcd-' + str(cnt) + '\n')
-				cnt += 1
+	exit() 
+
+dic = {}
+
+for line in lines:
+	line = line.split('/')
+	if len(line) == 3:
+		f = os.popen('etcdctl get ' + '/'.join(line))
+		role = f.read().strip()
+		dic[line[2]] = role
+	
+dic = sorted(dic.items(), key=lambda item: item[0][-1])
+
+with open('/tmp/hosts', 'w') as f:
+	f.write('127.0.0.1  localhost\n')
+	cnt = 1
+	for item in dic:
+		ip = item[0]
+		role = item[1]
+		if role == 'master':
+			f.write(ip + ' etcd-0\n')
+		else:
+			f.write(ip + ' etcd-' + str(cnt) + '\n')
+			cnt += 1
+
+os.system('echo "calico" | sudo -S bash -c "cp /tmp/hosts /etc/hosts"')
 ```
 
-监视进程本身可以通过``etcdctl``的选项实现
+#### 效果展示
 
-```
-def init_watcher():
-	args = ['etcdctl', 'exec-watch', '--recursive', '/etcd', '--', 'python3', '/root/init/edit_hosts.py']
-	subprocess.Popen(args)
-```
+启动3个容器
 
-然而目前主要能在master故障的情况下恢复，由于follower故障实际并不会改变etcd键值内容因此并不会检测到。
+![mesos](./pics/mesos.PNG)
+
+可以自动打开jupyter notebook并配置好代理，不需任何其余设置可以直接通过浏览器访问
+
+![jupyter](./pics/jupyter.PNG)
+
+查看ip地址和hosts如下
+
+![ip](./pics/ip.PNG)
+
+测试ssh无密码登录
+
+![ssh](./pics/ssh.PNG)
+
+无密码登录成功，现在从master转移到了一个follower上
+另外无密码登陆成功说明共享目录的设置是正确的，共享目录的路径是``/shared``，在这里不做演示了
+
+接下来是检测容错
+先测试follower宕机的情况
+先回到master结点，再在宿主机上使用``docker stopp``命令停止一个follower容器的运行
+
+查看mesos，显示failed
+
+![follower_failed](./pics/follower_failed.PNG)
+
+查看master的hosts，显示出变化
+
+![master_hosts](./pics/master_hosts.PNG)
+
+此时登录到etcd-1上查看hosts，与etcd-0上一致
+
+![etcd-1](./pics/etcd-1.PNG)
+
+接下来检测master宕机的情况，重新开启一个容器集群，
+这是master的情况:
+
+![master](./pics/master)
+
+同样，在相应的宿主机上通过``docker stop``命令停止它
+
+jupyter notebook马上失去链接
+
+![jupyter_404](./pics/jupyter_404.PNG)
+
+查看mesos，发现master failed
+
+![master_failed](./pics/master_failed.PNG)
+
+不久jupyter恢复，查看ip及hosts信息如下
+
+![master_recover](./pics/master_recover.PNG)
+
+配置成功

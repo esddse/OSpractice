@@ -23,7 +23,6 @@ def get_ip():
 	return f.read().strip()
 
 def gen_ssh_key(ip):
-
 	os.system("mkdir ~/.ssh")
 	os.system('echo "calico" | sudo -S bash -c "chmod 700 /home/calico/.ssh"')
 	os.system("ssh-keygen -t rsa -N '' -f ~/.ssh/id_rsa")
@@ -38,11 +37,6 @@ def launch_jupyter(ip):
 	args = ['jupyter', 'notebook', '--allow-root', '--NotebookApp.token=', '--ip='+ip]
 	subprocess.Popen(args)
 
-'''
-def init_watcher():
-	args = ['etcdctl', 'exec-watch', '--recursive', '/etcd', '--', 'python3', '/root/init/edit_hosts.py']
-	subprocess.Popen(args)
-'''
 
 def init_watcher():
 	args = ['python3','/home/calico/init/watch_etcd.py']
@@ -69,8 +63,6 @@ def etcd_loop(ip):
 				is_master = False
 				os.system('etcdctl mk /etcd/' + ip + ' follower --ttl 5')
 
-			#os.system('etcdctl updatedir /etcd --ttl 5')
-
 		time.sleep(0.1)
 
 def main():
@@ -83,7 +75,6 @@ def main():
 	# 初始化etcd监视者
 	init_watcher()
 	# 循环，检查自身状态，写入etcd
-	#os.system('/bin/bash')
 	etcd_loop(ip)
 	
 	
